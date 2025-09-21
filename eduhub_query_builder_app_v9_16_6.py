@@ -6,38 +6,38 @@ from datetime import date, datetime
 import io
 from pathlib import Path
 import re
-
-st.set_page_config(page_title="EduHub Query Builder (v9.16)", layout="wide")
-st.title("EduHub Query Builder (v9.16)")
-st.caption("Categorical counts grouped under Measures + precise button alignment.")
+from streamlit.components.v1 import html as st_html
+import uuid
 
 # ------------------------------
-# CSS: slim buttons + green Download
+# Page
+# ------------------------------
+st.set_page_config(page_title="Edu Hub Query Builder (Prototype)", layout="wide")
+st.title("Edu Hub Query Builder (Prototype)")
+st.caption("A simple builder for MOE HQ to filter, preview, and download cleansed datasets as CSV.")
+
+# ------------------------------
+# Styling
 # ------------------------------
 st.markdown("""
 <style>
-/* Global slim buttons */
-button[kind], .stButton > button, div[data-testid="stButton"] > button,
-div[data-testid="stDownloadButton"] > button {
-  padding: 0.2rem 0.7rem;
-  line-height: 1.1;
-  font-size: 0.9rem;
-  border-radius: 6px;
+/* Slim, one-line buttons */
+.stButton > button, div[data-testid="stDownloadButton"] > button {
+  padding: 0.25rem 0.7rem;
+  line-height: 1.15;
   white-space: nowrap;
-  text-overflow: ellipsis;
-  overflow: hidden;
+  border-radius: 6px;
+  font-size: 0.92rem;
 }
-
-/* Right-align containers for header rows */
+/* Right-align helper */
 .header-right { display: flex; justify-content: flex-end; }
-
-/* Download results: green/white */
-div[data-testid="stDownloadButton"] > button#download_results_only {
+/* Green download */
+div[data-testid="stDownloadButton"] > button {
   background-color: #22c55e !important;
   color: #ffffff !important;
   border: 1px solid #16a34a !important;
 }
-div[data-testid="stDownloadButton"] > button#download_results_only:hover {
+div[data-testid="stDownloadButton"] > button:hover {
   background-color: #16a34a !important;
   border-color: #15803d !important;
 }
@@ -45,10 +45,9 @@ div[data-testid="stDownloadButton"] > button#download_results_only:hover {
 """, unsafe_allow_html=True)
 
 # ------------------------------
-# Utilities
+# Helpers
 # ------------------------------
 JS_SAFE_INT = (1 << 53) - 1
-
 EPOCH_THRESHOLD_S = 10**9
 EPOCH_THRESHOLD_MS = 10**12
 EPOCH_THRESHOLD_NS = 10**15
@@ -83,7 +82,22 @@ def load_csv(path_or_buf):
         df = pd.read_csv(path_or_buf, encoding="utf-8-sig")
     df.columns = [c.strip() for c in df.columns]
 
-    # 1) Name-based date parsing
+    # Coerce percentages and comma numbers
+    for c in df.columns:
+        if pd.api.types.is_object_dtype(df[c]):
+            s = df[c].astype(str).str.strip()
+            pct_mask = s.str.match(r"^\s*-?\d+(\.\d+)?\s*%$")
+            if pct_mask.mean() >= 0.6:
+                s2 = s.str.replace("%", "", regex=False).str.replace(",", "", regex=False)
+                num = pd.to_numeric(s2, errors="coerce")
+                df[c] = num
+                continue
+            s2 = s.str.replace(",", "", regex=False)
+            num = pd.to_numeric(s2, errors="coerce")
+            if num.notna().mean() >= 0.7:
+                df[c] = num
+
+    # Name-based date parsing
     for c in df.columns:
         lc = c.lower()
         if lc in {"date","dob","created_at","updated_at"} or "date" in lc:
@@ -93,7 +107,7 @@ def load_csv(path_or_buf):
             else:
                 df[c] = pd.to_datetime(df[c], errors="coerce")
 
-    # 2) Generic epoch detection
+    # Generic epoch detection
     for c in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[c]):
             continue
@@ -105,7 +119,7 @@ def load_csv(path_or_buf):
             if unit:
                 df[c] = coerce_epoch_to_datetime(s_num, unit)
 
-    # 3) Integer-like cast (e.g., Year)
+    # Integer-like cast (e.g., Year)
     for c in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[c]):
             continue
@@ -134,11 +148,6 @@ def is_integer_like(series: pd.Series) -> bool:
 def sql_identifier(name: str) -> str:
     return name.replace(" ", "_")
 
-def safe_alias(text: str) -> str:
-    s = re.sub(r"[^0-9a-zA-Z_]+", "_", str(text).strip())
-    s = re.sub(r"_+", "_", s).strip("_")
-    return s or "value"
-
 def sql_literal(v):
     if isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool):
         try:
@@ -153,11 +162,7 @@ def sql_literal(v):
 def apply_filters(df: pd.DataFrame, filter_state: dict, skip_col: str = None) -> pd.DataFrame:
     out = df.copy()
     for col, f in (filter_state or {}).items():
-        if col == skip_col:
-            continue
-        if col not in out.columns:
-            continue
-        if not isinstance(f, dict):
+        if col == skip_col or col not in out.columns or not isinstance(f, dict):
             continue
         ftype = f.get("type")
         if ftype == "categorical":
@@ -165,31 +170,25 @@ def apply_filters(df: pd.DataFrame, filter_state: dict, skip_col: str = None) ->
             if vals:
                 out = out[out[col].astype(str).isin([str(x) for x in vals])]
         elif ftype == "date_range":
-            start = f.get("start")
-            end = f.get("end")
+            start = f.get("start"); end = f.get("end")
             if start is not None and end is not None:
                 start = pd.to_datetime(start)
                 end = pd.to_datetime(end) + pd.Timedelta(days=1) - pd.Timedelta(milliseconds=1)
                 series = pd.to_datetime(out[col], errors="coerce")
                 out = out[(series >= start) & (series <= end)]
         elif ftype == "num_range":
-            vmin = f.get("min")
-            vmax = f.get("max")
+            vmin = f.get("min"); vmax = f.get("max")
             series = pd.to_numeric(out[col], errors="coerce")
             mask = pd.Series(True, index=out.index)
-            if vmin is not None:
-                mask &= series >= vmin
-            if vmax is not None:
-                mask &= series <= vmax
+            if vmin is not None: mask &= series >= vmin
+            if vmax is not None: mask &= series <= vmax
             out = out[mask]
     return out
 
 def build_where_clause(filter_state: dict, valid_columns) -> str:
     parts = []
     for col, f in (filter_state or {}).items():
-        if col not in valid_columns:
-            continue
-        if not isinstance(f, dict):
+        if col not in valid_columns or not isinstance(f, dict):
             continue
         key = sql_identifier(col)
         ftype = f.get("type")
@@ -199,25 +198,21 @@ def build_where_clause(filter_state: dict, valid_columns) -> str:
                 lits = ", ".join([sql_literal(v) for v in vals])
                 parts.append(f"{key} IN ({lits})")
         elif ftype == "date_range":
-            start = f.get("start")
-            end = f.get("end")
+            start = f.get("start"); end = f.get("end")
             if start is not None and end is not None:
                 parts.append(f"{key} BETWEEN {sql_literal(start)} AND {sql_literal(end)}")
         elif ftype == "num_range":
-            vmin = f.get("min")
-            vmax = f.get("max")
+            vmin = f.get("min"); vmax = f.get("max")
             if vmin is not None and vmax is not None:
                 parts.append(f"{key} BETWEEN {sql_literal(vmin)} AND {sql_literal(vmax)}")
             elif vmin is not None:
                 parts.append(f"{key} >= {sql_literal(vmin)}")
             elif vmax is not None:
                 parts.append(f"{key} <= {sql_literal(vmax)}")
-    if parts:
-        return "WHERE " + " AND ".join(parts)
-    return ""
+    return "WHERE " + " AND ".join(parts) if parts else ""
 
 # ------------------------------
-# Data sources (script dir first; else upload)
+# Data sources
 # ------------------------------
 try:
     base_dir = Path(__file__).parent
@@ -227,18 +222,16 @@ except NameError:
 default_files = {
     "Attendance": base_dir / "sample_attendance_sg_v2.csv",
     "PSLE Scores": base_dir / "sample_psle_scores_v2.csv",
+    "Graduate Employment Survey": base_dir / "GraduateEmploymentSurveyNTUNUSSITSMUSUSSSUTD.csv",
 }
-
 available = {name: path for name, path in default_files.items() if path.exists()}
 
 st.sidebar.header("1) Dataset")
-
-# Reset helpers
 def _reset_defaults():
     for k in list(st.session_state.keys()):
-        if k.startswith("cat_") or k.startswith("date_") or k.startswith("num_min_") or k.startswith("num_max_") or k.startswith("drv_"):
+        if k.startswith("cat_") or k.startswith("date_") or k.startswith("num_min_") or k.startswith("num_max_"):
             st.session_state.pop(k, None)
-    for k in ["filter_state","dims","measures","user_limit","sort_field","sort_dir"]:
+    for k in ["filter_state","dims","measures","user_limit","sort_field","sort_dir","_last_dynamic_max"]:
         st.session_state.pop(k, None)
     for k in list(st.session_state.keys()):
         if k.startswith("aggs_"):
@@ -250,12 +243,11 @@ def _trigger_reset_to_defaults():
     st.rerun()
 
 mode = "local" if available else "upload"
-
 if mode == "local":
     ds_name = st.sidebar.selectbox("Choose dataset", options=list(available.keys()), key="ds_name")
     df_raw = load_csv(available[ds_name])
 else:
-    st.sidebar.info("Sample CSVs not found in the script folder. Upload one or more CSVs below.")
+    st.sidebar.info("Sample CSVs not found. Upload one or more CSVs below.")
     if "uploaded_datasets" not in st.session_state:
         st.session_state["uploaded_datasets"] = {}
     uploaded = st.sidebar.file_uploader("Upload CSV files", type=["csv"], accept_multiple_files=True, key="uploader")
@@ -274,10 +266,12 @@ if st.session_state.get("_last_ds") != ds_name:
     st.session_state["_last_ds"] = ds_name
     st.rerun()
 
-# Column types
+# ------------------------------
+# Columns & defaults
+# ------------------------------
 cat_cols, num_cols, date_cols = detect_column_types(df_raw)
 
-# Dimensions pool (include low-cardinality numeric like Year)
+# Dimensions pool
 dim_num = [c for c in num_cols if df_raw[c].nunique(dropna=True) <= 200 or c.strip().lower() in {"year","term","week","month"}]
 dimension_candidates = [c for c in (cat_cols + date_cols + dim_num) if c in df_raw.columns]
 
@@ -285,36 +279,15 @@ dimension_candidates = [c for c in (cat_cols + date_cols + dim_num) if c in df_r
 measure_options = [c for c in num_cols if c in df_raw.columns]
 default_measures = [m for m in ["Score","Average Score"] if m in measure_options]
 
-# Low-cardinality categorical columns → derived count groups
-LOW_CARD_MAX = 6
-derived_groups = {}  # col -> list of values
-for c in cat_cols:
-    uniq = [str(x) for x in pd.Series(df_raw[c].dropna().astype(str).unique()).tolist()]
-    if 1 < len(uniq) <= LOW_CARD_MAX:
-        derived_groups[c] = sorted(uniq)
-
-# Auto-defaults for classic attendance Status
-auto_defaults = {}
-for c, vals in derived_groups.items():
-    if c.strip().lower() == "status":
-        present_like = [v for v in vals if v.lower() == "present"]
-        absent_like = [v for v in vals if v.lower() == "absent"]
-        if present_like and absent_like:
-            auto_defaults[c] = present_like + absent_like
-
 # If a reset was requested, prepopulate defaults BEFORE widgets render
 if st.session_state.pop("_force_defaults", False):
     st.session_state["dims"] = dimension_candidates[:]
     st.session_state["measures"] = default_measures
     for m in default_measures:
         st.session_state[f"aggs_{m}"] = ["avg"] if m.lower() == "score" else ["sum"]
-    # derived defaults stored as drv_<col>
-    for c, vals in derived_groups.items():
-        st.session_state[f"drv_{c}"] = auto_defaults.get(c, [])
-
 
 # ------------------------------
-# Data Fields + Reset (adjacent, minimal gap)
+# Data Fields + Reset (adjacent)
 # ------------------------------
 col_label, col_reset = st.sidebar.columns([0.7, 0.3])
 with col_label:
@@ -323,55 +296,39 @@ with col_reset:
     if st.button("Reset", key="reset_inline_btn"):
         _trigger_reset_to_defaults()
 
-# Render widgets
-
+# Data fields
 default_dims = dimension_candidates[:]
 dims = st.sidebar.multiselect("Choose data fields", options=dimension_candidates, default=default_dims, key="dims")
 
 # ------------------------------
-# Measures (grouped: numeric + categorical counts)
+# Measures (numeric only)
 # ------------------------------
 st.sidebar.subheader("Measures")
-
-# Numeric measures
 agg_options = ["count", "sum", "avg", "min", "max"]
 chosen_measures = st.sidebar.multiselect("Numeric measures", options=measure_options, default=default_measures, key="measures")
-
 agg_by_measure = {}
 for m in chosen_measures:
     default_aggs = st.session_state.get(f"aggs_{m}", ["avg"] if m.lower() == "score" else ["sum"])
     agg_by_measure[m] = st.sidebar.multiselect(f"Aggregations for {m}", options=agg_options, default=default_aggs, key=f"aggs_{m}")
 
-# Categorical counts grouped under Measures
-if derived_groups:
-    for c, vals in derived_groups.items():
-        exp = st.sidebar.expander(f"{c} (counts)", expanded=False)
-        with exp:
-            key = f"drv_{c}"
-            default_vals = st.session_state.get(key, auto_defaults.get(c, []))
-            st.multiselect("Values to count", options=vals, default=default_vals, key=key)
-
 # ------------------------------
-# Filters
+# Filters (auto-synced)
 # ------------------------------
 st.sidebar.header("3) Filters")
 
 def current_cat_state():
     state = {}
     for c in cat_cols:
-        key = f"cat_{c}"
-        vals = st.session_state.get(key, [])
-        if vals:
-            state[c] = {"type": "categorical", "values": vals}
+        v = st.session_state.get(f"cat_{c}", [])
+        if v:
+            state[c] = {"type": "categorical", "values": v}
     return state
 
 def current_date_state():
     state = {}
     for c in date_cols:
-        key = f"date_{c}"
-        v = st.session_state.get(key)
-        if v is None:
-            continue
+        v = st.session_state.get(f"date_{c}")
+        if v is None: continue
         if isinstance(v, (list, tuple)) and len(v) == 2:
             d1, d2 = v
         else:
@@ -384,26 +341,24 @@ def current_num_state():
     for c in num_cols:
         vmin = st.session_state.get(f"num_min_{c}")
         vmax = st.session_state.get(f"num_max_{c}")
-        if vmin is None and vmax is None:
-            continue
+        if vmin is None and vmax is None: continue
         state[c] = {"type": "num_range", "min": vmin, "max": vmax}
     return state
 
 changed_any = False
 
-# --- Categorical filters (sanitize BEFORE rendering)
+# Categorical
 for c in cat_cols:
-    other_filters = {}
-    for prev_c in cat_cols:
-        if prev_c == c:
-            continue
-        vals = st.session_state.get(f"cat_{prev_c}", [])
+    other = {}
+    for prev in cat_cols:
+        if prev == c: continue
+        vals = st.session_state.get(f"cat_{prev}", [])
         if vals:
-            other_filters[prev_c] = {"type": "categorical", "values": vals}
-    other_filters.update(current_date_state())
-    other_filters.update(current_num_state())
+            other[prev] = {"type": "categorical", "values": vals}
+    other.update(current_date_state())
+    other.update(current_num_state())
 
-    df_for_options = apply_filters(df_raw, other_filters)
+    df_for_options = apply_filters(df_raw, other)
     avail_vals = sorted([str(x) for x in df_for_options[c].dropna().astype(str).unique()]) if c in df_for_options.columns else []
 
     key = f"cat_{c}"
@@ -415,21 +370,16 @@ for c in cat_cols:
 
     st.sidebar.multiselect(f"{c}", options=avail_vals, default=sanitized, key=key)
 
-    all_vals = sorted([str(x) for x in df_raw[c].dropna().astype(str).unique()]) if c in df_raw.columns else []
-    unavailable = [v for v in all_vals if v not in avail_vals]
-    if unavailable:
-        st.sidebar.caption(f"Filtered out by other selections: {', '.join(unavailable)}")
-
-# --- Date filters (clamp BEFORE rendering)
+# Date
 for c in date_cols:
-    other_filters = {}
-    other_filters.update(current_cat_state())
+    other = {}
+    other.update(current_cat_state())
     for col, f in current_date_state().items():
         if col != c:
-            other_filters[col] = f
-    other_filters.update(current_num_state())
+            other[col] = f
+    other.update(current_num_state())
 
-    df_for_range = apply_filters(df_raw, other_filters)
+    df_for_range = apply_filters(df_raw, other)
     series = pd.to_datetime(df_for_range[c], errors="coerce") if c in df_for_range.columns else pd.Series([], dtype="datetime64[ns]")
     if series.notna().any():
         cmin, cmax = series.min().date(), series.max().date()
@@ -450,26 +400,24 @@ for c in date_cols:
         changed_any = True
     st.sidebar.date_input(f"{c} range", value=(nd1, nd2), key=key)
 
-# --- Numeric filters (int-friendly UI + JS-safe bounds)
+# Numeric
 for c in num_cols:
-    other_filters = {}
-    other_filters.update(current_cat_state())
-    other_filters.update(current_date_state())
+    other = {}
+    other.update(current_cat_state())
+    other.update(current_date_state())
     for col, f in current_num_state().items():
         if col != c:
-            other_filters[col] = f
+            other[col] = f
 
-    df_for_range = apply_filters(df_raw, other_filters)
+    df_for_range = apply_filters(df_raw, other)
     series = pd.to_numeric(df_for_range[c], errors="coerce") if c in df_for_range.columns else pd.Series([], dtype="float64")
     if series.notna().any():
         nmin = float(series.min(skipna=True))
         nmax = float(series.max(skipna=True))
     else:
-        nmin = 0.0
-        nmax = 0.0
+        nmin = 0.0; nmax = 0.0
 
-    min_key = f"num_min_{c}"
-    max_key = f"num_max_{c}"
+    min_key = f"num_min_{c}"; max_key = f"num_max_{c}"
     cur_min = st.session_state.get(min_key, nmin)
     cur_max = st.session_state.get(max_key, nmax)
 
@@ -497,7 +445,7 @@ for c in num_cols:
 if changed_any:
     st.rerun()
 
-# Build flat filter_state
+# Build filter state
 flat_filters = {}
 for c in cat_cols:
     vals = st.session_state.get(f"cat_{c}", [])
@@ -518,67 +466,40 @@ for c in num_cols:
         flat_filters[c] = {"type": "num_range", "min": vmin, "max": vmax}
 
 # ------------------------------
-# Execute with pandas BEFORE LIMIT (with derived)
+# Execute with pandas BEFORE LIMIT
 # ------------------------------
 df = apply_filters(df_raw, flat_filters)
-
-# Prepare derived specs (from grouped measure UI)
-derived_specs = []  # (col, value, temp_col_name, alias_out)
-for c, vals in derived_groups.items():
-    chosen_vals = st.session_state.get(f"drv_{c}", [])
-    for v in chosen_vals:
-        temp = f"__drv__{safe_alias(c)}__{safe_alias(v)}"
-        alias = f"{safe_alias(c)}_{safe_alias(v)}_count"
-        derived_specs.append((c, v, temp, alias))
-
 df_work = df.copy()
-for (c, v, temp, alias) in derived_specs:
-    df_work[temp] = (df_work[c].astype(str) == str(v)).astype(int)
 
-# Measures presence
-have_dims = len(st.session_state.get("dims", [])) > 0
-dims = [d for d in st.session_state.get("dims", []) if d in df_work.columns]
-have_num_measures = any(len(v)>0 for v in st.session_state.get("measures", []))
-have_derived = len(derived_specs) > 0
-have_measures = have_num_measures or have_derived
+# Aggregation
+dims_eff = [d for d in st.session_state.get("dims", []) if d in df_work.columns]
+have_dims = len(dims_eff) > 0
+have_measures = any(len(v)>0 for v in st.session_state.get("measures", []))
 
 if have_dims and have_measures:
-    grp_dims = dims
-    if grp_dims:
-        grp = df_work.groupby(grp_dims, dropna=False)
-        agg_dict = {}
-        # numeric measures
-        for m in st.session_state.get("measures", []):
-            if m not in df_work.columns:
-                continue
-            for how in st.session_state.get(f"aggs_{m}", []):
-                key = f"{m}_{how}"
-                if how == "avg":
-                    agg_dict[key] = (m, "mean")
-                elif how == "sum":
-                    agg_dict[key] = (m, "sum")
-                elif how == "min":
-                    agg_dict[key] = (m, "min")
-                elif how == "max":
-                    agg_dict[key] = (m, "max")
-                elif how == "count":
-                    agg_dict[key] = (m, "count")
-        # derived
-        for (c, v, temp, alias) in derived_specs:
-            if temp in df_work.columns:
-                agg_dict[alias] = (temp, "sum")
-        out_full = grp.agg(**agg_dict).reset_index() if agg_dict else df_work[grp_dims].drop_duplicates().reset_index(drop=True)
-    else:
-        out_full = df_work.copy()
+    grp = df_work.groupby(dims_eff, dropna=False)
+    agg_dict = {}
+    for m in st.session_state.get("measures", []):
+        if m not in df_work.columns: continue
+        for how in st.session_state.get(f"aggs_{m}", []):
+            key = f"{m}_{how}"
+            if how == "avg":
+                agg_dict[key] = (m, "mean")
+            elif how == "sum":
+                agg_dict[key] = (m, "sum")
+            elif how == "min":
+                agg_dict[key] = (m, "min")
+            elif how == "max":
+                agg_dict[key] = (m, "max")
+            elif how == "count":
+                agg_dict[key] = (m, "count")
+    out_full = grp.agg(**agg_dict).reset_index() if agg_dict else df_work[dims_eff].drop_duplicates().reset_index(drop=True)
 elif have_dims and not have_measures:
-    grp_dims = dims
-    out_full = df_work[grp_dims].drop_duplicates().reset_index(drop=True) if grp_dims else df_work.copy()
+    out_full = df_work[dims_eff].drop_duplicates().reset_index(drop=True) if dims_eff else df_work.copy()
 elif not have_dims and have_measures:
     rows = {}
-    # numeric measures
     for m in st.session_state.get("measures", []):
-        if m not in df_work.columns:
-            continue
+        if m not in df_work.columns: continue
         series = pd.to_numeric(df_work[m], errors="coerce")
         for how in st.session_state.get(f"aggs_{m}", []):
             if how == "avg":
@@ -591,28 +512,28 @@ elif not have_dims and have_measures:
                 rows[f"{m}_max"] = [series.max()]
             elif how == "count":
                 rows[f"{m}_count"] = [series.count()]
-    # derived
-    for (c, v, temp, alias) in derived_specs:
-        if temp in df_work.columns:
-            rows[alias] = [int(pd.to_numeric(df_work[temp], errors="coerce").sum())]
     out_full = pd.DataFrame(rows) if rows else pd.DataFrame()
 else:
     out_full = df_work.copy()
 
+# ------------------------------
 # Sort BEFORE limiting
-sort_candidates = (dims + [c for c in out_full.columns if c not in dims]) if len(out_full.columns) else list(out_full.columns)
-sort_field = st.sidebar.selectbox("Sort by", options=[c for c in sort_candidates if c in out_full.columns] or list(out_full.columns), index=0, key="sort_field")
-sort_dir = st.sidebar.radio("Direction", ["Ascending", "Descending"], index=0, horizontal=True, key="sort_dir")
+# ------------------------------
+sort_candidates = (dims_eff + [c for c in out_full.columns if c not in dims_eff]) if len(out_full.columns) else []
+if not sort_candidates:
+    sort_candidates = list(out_full.columns)
+sort_default_idx = 0 if sort_candidates else 0
+sort_field = st.sidebar.selectbox("Sort by", options=sort_candidates or [""], index=sort_default_idx, key="sort_field")
+sort_dir = st.sidebar.radio("", ["Ascending", "Descending"], index=0, horizontal=True, key="sort_dir", label_visibility="collapsed")
 ascending = (sort_dir == "Ascending")
-if sort_field in out_full.columns:
+if sort_field and (sort_field in out_full.columns):
     out_full = out_full.sort_values(by=sort_field, ascending=ascending)
 
-
-# Dynamic max rows + auto-synced LIMIT
+# ------------------------------
+# Row limit (auto-sync to max; user can dial down)
+# ------------------------------
 dynamic_max = int(out_full.shape[0])
 st.sidebar.header("4) Row limit")
-
-# Persist and auto-sync user_limit to the current max whenever it changes
 if dynamic_max == 0:
     st.sidebar.info("No rows match the current filters.")
     st.session_state["user_limit"] = 0
@@ -621,28 +542,17 @@ if dynamic_max == 0:
 else:
     prev_max = st.session_state.get("_last_dynamic_max")
     if prev_max != dynamic_max:
-        # size changed => reset LIMIT to new maximum
         st.session_state["user_limit"] = dynamic_max
         st.session_state["_last_dynamic_max"] = dynamic_max
-    # Clamp any stale value to [1, dynamic_max]
     current_limit = st.session_state.get("user_limit", dynamic_max)
     current_limit = max(1, min(int(current_limit), dynamic_max))
     st.session_state["user_limit"] = current_limit
-    user_limit = st.sidebar.number_input(
-        "LIMIT (rows returned)",
-        min_value=1,
-        max_value=dynamic_max,
-        value=current_limit,
-        step=1,
-        format="%d",
-        key="user_limit"
-    )
+    user_limit = st.sidebar.number_input("LIMIT (rows returned)", min_value=1, max_value=dynamic_max, value=current_limit, step=1, format="%d", key="user_limit")
 
 # Apply LIMIT
-
 out = out_full.head(int(user_limit)) if dynamic_max > 0 else out_full.head(0)
 
-# Tidy integer-like columns for display
+# Tidy integer-like display
 for c in out.columns:
     if pd.api.types.is_float_dtype(out[c]):
         if out[c].dropna().apply(lambda x: float(x).is_integer()).all():
@@ -653,7 +563,7 @@ out = out.reset_index(drop=True)
 out.insert(0, "S/N", range(1, len(out)+1))
 
 # ------------------------------
-# Results header with flush-right Download (v9_16_1: align like v9_10)
+# Results (hero) with Download
 # ------------------------------
 res_left, res_mid, res_right = st.columns([0.68, 0.14, 0.18])
 with res_left:
@@ -667,12 +577,66 @@ with res_right:
     st.download_button("Download results", data=csv_buf.getvalue(), file_name="eduhub_query_results.csv", mime="text/csv", key="download_results_only", use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# Table
 
-st.dataframe(out, use_container_width=True, hide_index=True)
+# Custom scroller with TOP horizontal scrollbar (hero view)
+_table_id = "tbl_" + str(uuid.uuid4()).replace("-", "")
+_table_html = out.to_html(index=False)
+_styled = f"""
+<style>
+/* Container layout */
+.scroller-wrap {{ position: relative; margin-top: 0.25rem; }}
+.scroller-top {{ overflow-x: auto; overflow-y: hidden; height: 16px; border: 1px solid #e5e7eb; border-bottom: none; }}
+.scroller-main {{ overflow: auto; max-height: 520px; border: 1px solid #e5e7eb; }}
+/* Table styling */
+.scroller-main table {{ border-collapse: collapse; font-size: 13px; }}
+.scroller-main th, .scroller-main td {{ padding: 6px 10px; border-bottom: 1px solid #eee; white-space: nowrap; }}
+.scroller-main thead th {{ position: sticky; top: 0; background: #fafafa; z-index: 1; }}
+/* Make scrollbars slightly thicker & visible */
+.scroller-top::-webkit-scrollbar, .scroller-main::-webkit-scrollbar {{ height: 12px; width: 12px; }}
+.scroller-top::-webkit-scrollbar-thumb, .scroller-main::-webkit-scrollbar-thumb {{ background: #cbd5e1; border-radius: 8px; }}
+.scroller-top::-webkit-scrollbar-thumb:hover, .scroller-main::-webkit-scrollbar-thumb:hover {{ background: #94a3b8; }}
+</style>
+<div class="scroller-wrap" id="{_table_id}_wrap">
+  <div class="scroller-top" id="{_table_id}_top">
+    <div class="spacer" style="width:1px;height:1px;"></div>
+  </div>
+  <div class="scroller-main" id="{_table_id}_main">
+    {_table_html}
+  </div>
+</div>
+<script>
+(function() {{
+  const topEl = document.getElementById("{_table_id}_top");
+  const mainEl = document.getElementById("{_table_id}_main");
+  const spacer = topEl.querySelector(".spacer");
+  function syncWidth() {{
+    spacer.style.width = mainEl.scrollWidth + "px";
+  }}
+  syncWidth();
+  // Observe changes in table size
+  const ro = new ResizeObserver(syncWidth);
+  ro.observe(mainEl);
+  // Sync the two scrollbars
+  let lock = false;
+  topEl.addEventListener("scroll", () => {{
+    if (lock) return;
+    lock = true;
+    mainEl.scrollLeft = topEl.scrollLeft;
+    lock = false;
+  }});
+  mainEl.addEventListener("scroll", () => {{
+    if (lock) return;
+    lock = true;
+    topEl.scrollLeft = mainEl.scrollLeft;
+    lock = false;
+  }});
+}})();
+</script>
+"""
+st_html(_styled, height=600, scrolling=False)
 
 # ------------------------------
-# SQL preview (include derived SUM(CASE WHEN ...))
+# SQL preview
 # ------------------------------
 def agg_sql_expr(col, how):
     key = sql_identifier(col)
@@ -690,18 +654,13 @@ def agg_sql_expr(col, how):
 
 select_parts = []
 group_by_parts = []
-if dims:
-    group_by_parts = [sql_identifier(d) for d in dims if d in df_raw.columns]
+if dims_eff:
+    group_by_parts = [sql_identifier(d) for d in dims_eff if d in df_raw.columns]
     select_parts.extend(group_by_parts)
 for m in st.session_state.get("measures", []):
     for how in st.session_state.get(f"aggs_{m}", []):
         if m in df_raw.columns:
             select_parts.append(agg_sql_expr(m, how))
-
-for (c, v, temp, alias) in derived_specs:
-    col_id = sql_identifier(c)
-    alias_id = safe_alias(alias)
-    select_parts.append(f"SUM(CASE WHEN {col_id} = {sql_literal(v)} THEN 1 ELSE 0 END) AS {alias_id}")
 
 where_clause = build_where_clause(flat_filters, df_raw.columns)
 order_col = sql_identifier(sort_field) if sort_field else None
@@ -719,10 +678,5 @@ FROM {{approved_curated_view_for_{ds_name.replace(' ', '_')}}}
 LIMIT {limit_value};
 """.strip()
 
-# ------------------------------
-# Generated SQL
-# ------------------------------
 st.subheader("Generated Structured Query Language")
 st.code(generated_sql, language="sql")
-
-
