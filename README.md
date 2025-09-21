@@ -28,7 +28,7 @@ Designed for datasets like PSLE scores and school attendance, with filters, meas
 ## 📊 Demo datasets included
 - `sample_psle_scores_v2.csv`  
 - `sample_attendance_sg_v2.csv`
-- `graduate_employment`
+- `graduate_employment.csv`
 
 ---
 
