@@ -845,8 +845,12 @@ for m in st.session_state.get("measures", []):
 
 where_clause = build_where_clause(flat_filters, df_raw.columns)
 # Handle multi-field sort safely
-order_cols = [sql_identifier(f) for f in sort_fields] if sort_fields else []
+order_cols = [
+    f"{sql_identifier(f)} {'ASC' if asc else 'DESC'}"
+    for f, asc in zip(sort_fields, sort_orders)
+] if sort_fields else []
 order_clause = "ORDER BY " + ", ".join(order_cols) if order_cols else ""
+
 select_clause = ",\n       ".join(select_parts) if select_parts else "*"
 group_by_clause = f"GROUP BY {', '.join(group_by_parts)}" if group_by_parts else ""
 limit_value = int(user_limit) if dynamic_max > 0 else 0
