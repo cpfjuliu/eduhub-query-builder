@@ -682,17 +682,32 @@ else:
 # ------------------------------
 # Sort BEFORE limiting (multi-field with per-field directions)
 # ------------------------------
+
+# Build sort candidates
 sort_candidates = (dims_eff + [c for c in out_full.columns if c not in dims_eff]) if len(out_full.columns) else []
 if not sort_candidates:
     sort_candidates = list(out_full.columns)
 
-# Allow multi-field sorting
+# --- Preserve selected sort fields across data-field changes ---
+prev_sort = st.session_state.get("sort_fields", [])
+# Keep only those still valid under current candidates
+preserved_sort = [s for s in prev_sort if s in sort_candidates]
+
+# If there was state before and it contains invalid items, prune it
+if "sort_fields" in st.session_state and preserved_sort != prev_sort:
+    st.session_state["sort_fields"] = preserved_sort
+
+# Determine default only if no prior state
+_default_sort = preserved_sort if preserved_sort else (sort_candidates[:1] if not prev_sort else prev_sort)
+
+# Render widget with stable key; Streamlit will prefer session_state over default
 sort_fields = st.sidebar.multiselect(
     "Sort by (multiple allowed)",
     options=sort_candidates,
-    default=sort_candidates[:1],
+    default=_default_sort,
     key="sort_fields"
 )
+# --- End preserve logic ---
 
 sort_orders = []
 if sort_fields:
