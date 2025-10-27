@@ -699,8 +699,32 @@ if "sort_fields" in st.session_state and preserved_sort != prev_sort:
 
 # Determine default only if no prior state
 _default_sort = preserved_sort if preserved_sort else (sort_candidates[:1] if not prev_sort else prev_sort)
+# --- VALIDATE DEFAULTS AGAINST CURRENT OPTIONS ---
+if isinstance(_default_sort, str):
+    _default_sort = [_default_sort]
+elif _default_sort is None:
+    _default_sort = []
+try:
+    _default_sort = [f for f in _default_sort if f in sort_candidates]
+except Exception:
+    _default_sort = []
+
 
 # Render widget with stable key; Streamlit will prefer session_state over default
+# --- FIX: Prevent StreamlitAPIException when defaults not in options ---
+if 'default_sort_fields' in locals():
+    default_sort_fields = [f for f in default_sort_fields if f in selected_fields]
+else:
+    default_sort_fields = []
+
+# --- FIX: Prevent StreamlitAPIException when defaults not in options ---
+if 'sort_default' in locals():
+    sort_default = [f for f in sort_default if f in selected_fields]
+elif 'default_sort_fields' in locals():
+    default_sort_fields = [f for f in default_sort_fields if f in selected_fields]
+else:
+    sort_default = []
+
 sort_fields = st.sidebar.multiselect(
     "Sort by (multiple allowed)",
     options=sort_candidates,
