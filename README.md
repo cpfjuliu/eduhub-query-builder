@@ -1,7 +1,7 @@
 # EduHub Query Builder
 
-A Streamlit app that lets users interactively build queries and see results instantly.  
-Designed for datasets like PSLE scores and school attendance, with filters, measures, and SQL preview.
+A Streamlit-based self-service data exploration tool that allows MOE HQ officers to filter, sort, and download datasets without coding knowledge.  
+The app dynamically validates defaults to prevent Streamlit exceptions when switching datasets or removing fields.
 
 ---
 
@@ -26,17 +26,31 @@ Designed for datasets like PSLE scores and school attendance, with filters, meas
 ---
 
 ## 📊 Demo datasets included
-- `sample_psle_scores_v2.csv`  
-- `sample_attendance_sg_v2.csv`
-- `GraduateEmploymentSurveyNTUNUSSITSMUSUSSSUTD.csv`
+| Dataset                                            | Description                                 |
+| -------------------------------------------------- | ------------------------------------------- |
+| `sample_p6_scores.csv`                             | P6 students' 2022–2024 exam results         |
+| `sample_psle_scores_v2.csv`                        | Extended PSLE performance dataset           |
+| `sample_attendance_sg_v2.csv`                      | Student attendance records (v2)             |
+| `sample_attendance_sg_v3.csv`                      | Enhanced attendance dataset with new fields |
+| `GraduateEmploymentSurveyNTUNUSSITSMUSUSSSUTD.csv` | Public graduate employment survey dataset   |
+
+
+---
+
+⚙️ Features
+Interactive field selection, filtering, and sorting
+Dynamic validation of defaults to prevent Streamlit errors
+SQL query preview and CSV download
+Support for multiple datasets
+Responsive sidebar and intuitive UX
 
 ---
 
 ## 🌐 Deployment
-You can deploy this app directly to **Streamlit Community Cloud**:
-1. Push the code to GitHub.
-2. Go to [share.streamlit.io](https://share.streamlit.io).
-3. Connect your repo and select the main file `eduhub_query_builder_app_v9_16_6.py`.
+Deploy directly to Streamlit Community Cloud:
+1. Push this repo to GitHub.
+2. Visit share.streamlit.io.
+3. Choose app.py as the main entry file.
 
 ---
 
